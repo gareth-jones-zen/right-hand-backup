@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/RightHandBackup/RightHandBackup.csproj" />
+  <Project Path="src/RightHandBackup.Console/RightHandBackup.Console.csproj" />
+  <Project Path="src/RightHandBackup.Background/RightHandBackup.Background.csproj" />
+
+  <Project Path="tests/RightHandBackup.Tests/RightHandBackup.Tests.csproj" />
+</Solution>

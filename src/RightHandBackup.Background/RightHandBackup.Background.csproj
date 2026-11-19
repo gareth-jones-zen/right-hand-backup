@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>right-hand-backup-background</AssemblyName>
+    <RootNamespace>RightHandBackup</RootNamespace>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RightHandBackup\RightHandBackup.csproj" />
+  </ItemGroup>
+</Project>
