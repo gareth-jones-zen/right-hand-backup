@@ -241,10 +241,53 @@ public static partial class Backup
         return now.Count == then.Count && now.All(kv => then.TryGetValue(kv.Key, out var h) && h == kv.Value);
     }
 
+    /// <summary>The tries, and the waits between them, for a rename or a delete in the destination (0.2.0). OneDrive
+    /// holds a folder it is still uploading, and its files, so "Access to the path ... is denied" straight after a
+    /// snapshot is written, or while an old one is pruned, usually clears within seconds.</summary>
+    public static readonly TimeSpan[] FolderWaits = [TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(20)];
+
+    /// <summary>Run a folder operation, trying again after each of <see cref="FolderWaits"/> when the folder is held
+    /// (IOException, UnauthorizedAccessException); the last failure is thrown.</summary>
+    public static void WithRetries(Action action, Action<TimeSpan> sleep)
+    {
+        for (var i = 0; ; i++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception error) when ((error is IOException or UnauthorizedAccessException) && i < FolderWaits.Length)
+            {
+                sleep(FolderWaits[i]);
+            }
+        }
+    }
+
+    /// <summary>Delete a folder and everything in it, clearing read-only attributes first (a copied file can carry
+    /// one, and Directory.Delete won't remove it).</summary>
+    public static void DeleteFolder(string folder)
+    {
+        foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
+        {
+            var attributes = File.GetAttributes(file);
+            if ((attributes & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(file, attributes & ~FileAttributes.ReadOnly);
+        }
+        Directory.Delete(folder, true);
+    }
+
     /// <summary>Write a snapshot: into a ".partial" folder, then renamed, so a half-written one never looks
     /// complete. Returns its name.</summary>
     public static string Write(string machineFolder, PassResult pass, ScanResult scan, Config config, DateTime now, string version)
+        => Write(machineFolder, pass, scan, config, now, version, Thread.Sleep);
+
+    /// <summary>As <see cref="Write(string, PassResult, ScanResult, Config, DateTime, string)"/>, with the rename of the
+    /// ".partial" folder retried (<see cref="WithRetries"/>) while OneDrive holds it.</summary>
+    public static string Write(string machineFolder, PassResult pass, ScanResult scan, Config config, DateTime now, string version,
+        Action<TimeSpan> sleep, Action<string, string>? move = null)
     {
+        move ??= Directory.Move;
         Directory.CreateDirectory(machineFolder);
         var stem = now.ToString("yyyy-MM-dd-HHmm", En);
         var name = stem;
@@ -275,7 +318,7 @@ public static partial class Backup
             Unsettled = pass.Unsettled,
         };
         JsonFile.Write(System.IO.Path.Combine(partial, Manifest.FileName), manifest.ToJson());
-        Directory.Move(partial, final);
+        WithRetries(() => move(partial, final), sleep);
         return name;
     }
 
@@ -327,26 +370,46 @@ public static partial class Backup
     /// <summary>Delete what the keep rules drop, and ".partial" folders left by a run that died more than a day ago.
     /// Only folders named as snapshots, holding a manifest, are ever deleted. Returns their names.</summary>
     public static List<string> Prune(string machineFolder, Keep keep, DateTime now, bool dryRun)
+        => Prune(machineFolder, keep, now, dryRun, Thread.Sleep).Removed;
+
+    /// <summary>What a prune removed, and what it couldn't (each with why): left for the next run to try again.</summary>
+    public sealed record PruneResult(List<string> Removed, List<(string Name, string Why)> Failed);
+
+    /// <summary>As <see cref="Prune(string, Keep, DateTime, bool)"/>, each delete retried while OneDrive holds the folder
+    /// (<see cref="WithRetries"/>), and one that still fails is reported, not thrown (0.2.0): the snapshot this run
+    /// took stays good, and the old one is tried again next run.</summary>
+    public static PruneResult Prune(string machineFolder, Keep keep, DateTime now, bool dryRun, Action<TimeSpan> sleep,
+        Action<string>? delete = null)
     {
-        var gone = new List<string>();
-        foreach (var s in ToDrop(Snapshots(machineFolder), keep, now))
+        delete ??= DeleteFolder;
+        var result = new PruneResult([], []);
+        void Remove(string folder, string name)
         {
-            if (!dryRun)
-                Directory.Delete(s.Folder, true);
-            gone.Add(s.Name);
+            if (dryRun)
+            {
+                result.Removed.Add(name);
+                return;
+            }
+            try
+            {
+                WithRetries(() => delete(folder), sleep);
+                result.Removed.Add(name);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                result.Failed.Add((name, error.Message));
+            }
         }
+        foreach (var s in ToDrop(Snapshots(machineFolder), keep, now))
+            Remove(s.Folder, s.Name);
         if (Directory.Exists(machineFolder))
             foreach (var folder in Directory.GetDirectories(machineFolder, "*" + PartialSuffix))
             {
                 var name = System.IO.Path.GetFileName(folder);
                 if (SnapshotName().IsMatch(name[..^PartialSuffix.Length]) && Directory.GetLastWriteTime(folder) < now.AddDays(-1))
-                {
-                    if (!dryRun)
-                        Directory.Delete(folder, true);
-                    gone.Add(name);
-                }
+                    Remove(folder, name);
             }
-        return gone;
+        return result;
     }
 
     // ---- checking ----

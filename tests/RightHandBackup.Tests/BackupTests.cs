@@ -470,4 +470,77 @@ public sealed class BackupTests : IDisposable
         Assert.Equal("run", task.Args[^1]);
         Assert.Contains("every 120 minutes", output);
     }
+
+    [Fact]
+    public void After_unlock_minutes_0_registers_no_unlock_trigger()
+    {
+        var (code, output, _) = Run(Settings("").Replace("max_snapshot_mb = 1", "max_snapshot_mb = 1\nevery_minutes = 120\nafter_unlock_minutes = 0"), "autostart", "on");
+        Assert.Equal(0, code);
+        Assert.Equal(TimeSpan.FromMinutes(120), task.Schedule!.Every);
+        Assert.Null(task.Schedule.AfterUnlock);
+        Assert.DoesNotContain("unlock", output);
+    }
+
+    // ---- OneDrive holding the destination (0.2.0) ----
+
+    [Fact]
+    public void A_held_folder_is_tried_again_after_a_short_wait_and_the_last_failure_is_thrown()
+    {
+        var waits = new List<TimeSpan>();
+        var tries = 0;
+        Backup.WithRetries(() => { if (++tries < 3) throw new IOException("Access to the path is denied."); }, waits.Add);
+        Assert.Equal(3, tries);
+        Assert.Equal(Backup.FolderWaits[..2], waits);
+
+        waits.Clear();
+        tries = 0;
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            Backup.WithRetries(() => { tries++; throw new UnauthorizedAccessException("denied"); }, waits.Add));
+        Assert.Equal(Backup.FolderWaits.Length + 1, tries);
+        Assert.Equal(Backup.FolderWaits, waits);
+    }
+
+    [Fact]
+    public void A_prune_that_still_fails_leaves_the_run_good_and_says_so()
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            Put("state.json", $"{{\"n\":{i}}}");
+            Run(Settings(), "run");
+            now = now.AddDays(1);
+        }
+        var keep = new Keep(1, 0, 0);
+        var stuck = Backup.ToDrop(Backup.Snapshots(Machine), keep, now).Select(s => s.Name).ToList();
+        Assert.NotEmpty(stuck);
+        var waits = new List<TimeSpan>();
+        var result = Backup.Prune(Machine, keep, now, dryRun: false, waits.Add,
+            folder => throw new IOException($"Access to the path '{folder}' is denied."));
+        Assert.Empty(result.Removed);
+        Assert.Equal(stuck, result.Failed.Select(f => f.Name));
+        Assert.All(result.Failed, f => Assert.Contains("is denied", f.Why));
+        Assert.Equal(stuck.Order(), SnapshotNames().Intersect(stuck).Order());   // still there, for the next run
+
+        // a whole run with an old snapshot that won't go: the run still succeeds and logs it
+        Put("state.json", "{\"n\":9}");
+        var locked = Path.Combine(Machine, stuck[0], "locked.txt");
+        File.WriteAllText(locked, "x");
+        using (File.Open(locked, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var (code, _, _) = Run(Settings("[keep]\nall_hours = 1\ndaily_days = 0\nweekly_weeks = 0"), "run");
+            Assert.Equal(0, code);
+        }
+        Assert.Contains($"couldn't remove old snapshot {stuck[0]} yet", File.ReadAllText(Path.Combine(dir, "rhb.log")));
+    }
+
+    [Fact]
+    public void Deleting_a_snapshot_clears_read_only_files_first()
+    {
+        var folder = Path.Combine(dir, "ro");
+        Directory.CreateDirectory(Path.Combine(folder, "claude-code", "plugins"));
+        var file = Path.Combine(folder, "claude-code", "plugins", "x.json");
+        File.WriteAllText(file, "{}");
+        File.SetAttributes(file, FileAttributes.ReadOnly);
+        Backup.DeleteFolder(folder);
+        Assert.False(Directory.Exists(folder));
+    }
 }

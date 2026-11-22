@@ -221,7 +221,7 @@ public static class Cli
         var bytes = pass.Files.Sum(f => f.Data.LongLength);
         if (!same)
         {
-            var name = RightHandBackup.Backup.Write(machineFolder, pass, scan, config, now, Version);
+            var name = RightHandBackup.Backup.Write(machineFolder, pass, scan, config, now, Version, host.Sleep);
             latest = new SnapshotInfo(name, now, Path.Combine(machineFolder, name));
             last = Manifest.Load(latest.Folder);
             var line = $"snapshot {name}: {pass.Files.Count} files, {RightHandBackup.Backup.Size(bytes)}"
@@ -235,8 +235,11 @@ public static class Cli
             log($"no change since {latest.Name} ({pass.Files.Count} files)");
         }
         RightHandBackup.Backup.WriteLatest(machineFolder, now, latest, last, !same, pass.Skipped.Count, Version);
-        foreach (var gone in RightHandBackup.Backup.Prune(machineFolder, config.Keep, now, dryRun: false))
+        var pruned = RightHandBackup.Backup.Prune(machineFolder, config.Keep, now, dryRun: false, host.Sleep);
+        foreach (var gone in pruned.Removed)
             log($"removed old snapshot {gone}");
+        foreach (var (stuck, why) in pruned.Failed)
+            log($"couldn't remove old snapshot {stuck} yet (tried again next run): {why}");
         Skips(config, host, pass.Skipped);
         return 0;
     }

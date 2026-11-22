@@ -57,10 +57,14 @@ Windows (x64) only; nothing else is needed.
    synced folder isn't churned. Either way, `latest.json` records when it last checked.
 4. **Otherwise it writes a snapshot**, `<destination>\<machine>\YYYY-MM-DD-HHmm\`, with a folder per source and a
    `manifest.json` (each file's path, size, SHA-256 and time; what was skipped, refused or still changing). It is
-   written as `.partial` and renamed when complete, so a half-written one never looks real.
+   written as `.partial` and renamed when complete, so a half-written one never looks real. A destination that syncs
+   (OneDrive) can hold a folder it is still uploading, so the rename is tried again after 2, 5, 10 and 20 seconds
+   before the run gives up.
 5. **It removes old snapshots** by the `[keep]` rules: everything from the last 48 hours, then the newest of each day
    for 30 days, then the newest of each week for 12 weeks. The newest is always kept. Only folders it wrote (named as
-   snapshots, holding a manifest) are ever deleted.
+   snapshots, holding a manifest) are ever deleted. Each delete is retried the same way (read-only files are cleared
+   first); one that still fails is logged ("couldn't remove old snapshot ... yet") and tried again next run, and
+   doesn't fail the run: the snapshot it has just written is good either way.
 
 **What's never copied, whatever the settings say:** Edge and other browser profiles (`*edge-profile*`, `User Data`),
 cookies and saved passwords, sign-in token caches (`msal-cache*`, `*token-cache*`), credentials files
