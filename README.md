@@ -134,10 +134,12 @@ destination = "%OneDriveCommercial%/right-hand-backup"   # a folder per machine 
 machine = "%COMPUTERNAME%"        # optional: this PC's folder name (default the computer's name)
 log_file = "..."                  # optional; default %LOCALAPPDATA%\right-hand-backup\right-hand-backup.log
 state_file = "..."                # optional: only failures and files skipped in a row
-every_minutes = 120               # autostart
-after_unlock_minutes = 5          # autostart; 0 for none
 max_snapshot_mb = 50
 notify = true
+
+[schedule]                        # when the task runs (below)
+every_minutes = 120
+after_unlock_minutes = 5          # 0 for none
 
 [keep]
 all_hours = 48
@@ -155,6 +157,14 @@ staging = "%LOCALAPPDATA%/right-hand-backup/restore"
 stop_tasks = ["my-tool run"]      # Task Scheduler names
 warn_if_older = ["my-tool/bookings.json"]
 ```
+
+**[schedule]** is background-tools-lib's shared scheduling table (WinBackground's `ScheduleSettings`), the same keys in
+every tool: `every_minutes`, `daily_at` (with `every_minutes = 0`), `at_logon` (default true), `after_unlock_minutes`
+(0 for none) set the task's triggers; `hours` ("08:00-18:00"), `days` ("Mon-Fri") and `end_date` limit when a run
+takes a snapshot (outside them it says so and does nothing). The defaults are every 120 minutes, at logon and 5 minutes
+after each unlock. **A change takes effect when you run `autostart on` again**: the task records its schedule, and
+`autostart status` says when the settings no longer match it. The top-level `every_minutes` and `after_unlock_minutes`
+of 0.2 and earlier still work, but not together with `[schedule]`.
 
 **Patterns** are relative to the source folder, with `/` between folders: `*` and `?` stay within one folder, `**`
 spans any number of them. So `*.json` is the folder's own JSON files, not its subfolders'; `handlers/**` is everything

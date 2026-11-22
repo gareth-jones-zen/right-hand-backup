@@ -125,6 +125,11 @@ public static class Cli
             using var held = host.Lock && (isRun || options.Apply) ? Locks.Exclusive("right-hand-backup-" + Locks.Key(config.Path), 300) : null;
             if (options.Command == "restore")
                 return RestoreCommand(config, host, options);
+            if (isRun && !config.Schedule.IsActive(host.Now(), out var notNow))
+            {
+                host.Out.WriteLine($"Not running now: {notNow} ([schedule]).");
+                return 0;
+            }
             var code = TakeSnapshot(config, host, options.DryRun);
             if (isRun)
                 ForgetFailure(config);
@@ -484,18 +489,9 @@ public static class Cli
             case "on":
                 var background = Path.Combine(host.ProgramDir, BackgroundExe);
                 var exe = File.Exists(background) ? background : Path.Combine(host.ProgramDir, "right-hand-backup.exe");
-                var schedule = new TaskSchedule
-                {
-                    AtLogon = true,
-                    Every = TimeSpan.FromMinutes(config.EveryMinutes),
-                    AfterUnlock = config.AfterUnlockMinutes is { } u ? TimeSpan.FromMinutes(u) : null,
-                    KeepRunning = false,
-                    TimeLimit = TimeSpan.FromMinutes(10),
-                };
+                var schedule = config.Schedule.ToTaskSchedule(TaskKind.Job, TimeSpan.FromMinutes(10));
                 var line = task.Enable(exe, ["--config", config.Path, "run"], Path.GetDirectoryName(config.Path), schedule);
-                host.Out.WriteLine($"Autostart is on: '{TaskName}' runs every {config.EveryMinutes} minutes, at logon" +
-                                   (config.AfterUnlockMinutes is { } m ? $" and {m} minute(s) after each unlock" : "") +
-                                   $", and has run now.\n  {line}");
+                host.Out.WriteLine($"Autostart is on: '{TaskName}' {Describe(config.Schedule)}, and has run now.\n  {line}");
                 return 0;
             case "off":
                 host.Out.WriteLine(task.Disable() ? "Autostart is off." : "Autostart was already off.");
@@ -520,9 +516,31 @@ public static class Cli
                     host.Out.WriteLine($"Autostart is on ('{TaskName}').");
                     foreach (var name in new[] { "state", "last_run", "last_result", "next_run", "command" })
                         host.Out.WriteLine($"  {name.Replace('_', ' '),-12} {info.GetValueOrDefault(name, "")}");
+                    if (ScheduleDrift.Advice(ScheduleDrift.Check(info, config.Schedule.Fingerprint(TaskKind.Job)), Prog) is { } advice)
+                        host.Out.WriteLine($"  {advice}");
                 }
                 return 0;
         }
+    }
+
+    /// <summary>"runs every 120 minutes, at logon and 5 minute(s) after each unlock".</summary>
+    internal static string Describe(ScheduleSettings s)
+    {
+        var parts = new List<string>();
+        if (s.EveryMinutes is > 0 and var m)
+            parts.Add($"runs every {m} minutes");
+        else if (s.DailyAt is { } d)
+            parts.Add($"runs daily at {d}");
+        if (s.AtLogon)
+            parts.Add("at logon");
+        if (s.AfterUnlockMinutes > 0)
+            parts.Add($"{s.AfterUnlockMinutes} minute(s) after each unlock");
+        return parts.Count switch
+        {
+            0 => "is registered",
+            1 => parts[0],
+            _ => string.Join(", ", parts[..^1]) + " and " + parts[^1],
+        };
     }
 
     // ---- arguments ----

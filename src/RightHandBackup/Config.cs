@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using PyCompat;
 using Tomlyn;
 using Tomlyn.Model;
+using WinBackground;
 
 namespace RightHandBackup;
 
@@ -30,9 +31,11 @@ public sealed partial class Config
         "# Where snapshots go: a folder per machine below it. A synced folder (OneDrive) keeps them off this PC.\n" +
         "destination = \"%OneDriveCommercial%/right-hand-backup\"\n" +
         "# machine = \"%COMPUTERNAME%\"        # the folder for this PC's snapshots (default: the computer's name)\n" +
-        "every_minutes = 120                # autostart: how often a run looks for changes\n" +
-        "after_unlock_minutes = 5           # autostart: and this long after each unlock (0 for none)\n" +
         "max_snapshot_mb = 50               # over this, nothing is written: something big got included\n" +
+        "\n" +
+        "[schedule]                         # when the task runs (background-tools-lib's shared keys)\n" +
+        "every_minutes = 120                # how often a run looks for changes\n" +
+        "after_unlock_minutes = 5           # and this long after each unlock (0 for none)\n" +
         "\n" +
         "[keep]\n" +
         "all_hours = 48                     # every snapshot from the last 48 hours\n" +
@@ -55,7 +58,7 @@ public sealed partial class Config
     public static readonly string[] KnownKeys =
     [
         "log_file", "state_file", "destination", "machine", "every_minutes", "after_unlock_minutes", "max_snapshot_mb",
-        "notify", "keep", "source", "restore",
+        "notify", "keep", "source", "restore", "schedule",
     ];
 
     public required string Path { get; init; }
@@ -68,6 +71,13 @@ public sealed partial class Config
     public required string Machine { get; init; }
     public int EveryMinutes { get; init; } = 120;
     public int? AfterUnlockMinutes { get; init; } = 5;
+
+    /// <summary>The task's schedule when the settings say nothing: every 120 minutes, at logon and 5 minutes after each unlock.</summary>
+    public static readonly ScheduleSettings DefaultSchedule = new() { EveryMinutes = 120, AtLogon = true, AfterUnlockMinutes = 5 };
+
+    /// <summary>[schedule] (0.3.0): background-tools-lib's shared keys. The top-level every_minutes and after_unlock_minutes
+    /// are the old way, still read; setting both forms is an error.</summary>
+    public ScheduleSettings Schedule { get; init; } = DefaultSchedule;
     public int MaxSnapshotMb { get; init; } = 50;
     public bool Notify { get; init; } = true;
     public Keep Keep { get; init; } = new(48, 30, 12);
@@ -228,15 +238,44 @@ public sealed partial class Config
             throw Bad($"machine '{machine}' should be letters, digits, '.', '_' or '-' (it names a folder).");
 
         var stopTasks = Strings(restore, "stop_tasks", "restore.stop_tasks");
+
+        // [schedule] (0.3.0), or the old top-level keys, never both.
+        ScheduleSettings schedule;
+        if (raw.TryGetValue("schedule", out var scheduleValue))
+        {
+            if (raw.ContainsKey("every_minutes") || raw.ContainsKey("after_unlock_minutes"))
+                throw Bad("every_minutes or after_unlock_minutes is set both at the top and in [schedule]: keep [schedule] (the top-level keys are the old way).");
+            if (scheduleValue is not TomlTable scheduleTable)
+                throw Bad("[schedule] should be a table (every_minutes, after_unlock_minutes, at_logon, hours, days, end_date).");
+            try
+            {
+                schedule = ScheduleSettings.Parse(scheduleTable, DefaultSchedule, TaskKind.Job, $"{full}: [schedule]");
+            }
+            catch (FormatException error)
+            {
+                throw new UsageException(error.Message.TrimEnd());
+            }
+        }
+        else
+        {
+            var oldUnlock = raw.ContainsKey("after_unlock_minutes") ? Whole(raw, "after_unlock_minutes", "after_unlock_minutes", 5, 0, 60) : 5;
+            schedule = DefaultSchedule with
+            {
+                EveryMinutes = Whole(raw, "every_minutes", "every_minutes", 120, 1, 1440),
+                AfterUnlockMinutes = oldUnlock,
+            };
+        }
+
         return new Config
         {
+            Schedule = schedule,
             Path = full,
             LogFile = Text(raw, "log_file", "log_file") is { } log ? PathSetting(log, "log_file") : PyPath.Pure(System.IO.Path.Combine(Local(env), "right-hand-backup.log")),
             StateFile = Text(raw, "state_file", "state_file") is { } state ? PathSetting(state, "state_file") : PyPath.Pure(System.IO.Path.Combine(Local(env), "state.json")),
             Destination = dest,
             Machine = machine,
-            EveryMinutes = Whole(raw, "every_minutes", "every_minutes", 120, 1, 1440),
-            AfterUnlockMinutes = raw.ContainsKey("after_unlock_minutes") ? Whole(raw, "after_unlock_minutes", "after_unlock_minutes", 5, 0, 60) is var u && u > 0 ? u : null : 5,
+            EveryMinutes = schedule.EveryMinutes ?? 120,
+            AfterUnlockMinutes = schedule.AfterUnlockMinutes > 0 ? schedule.AfterUnlockMinutes : null,
             MaxSnapshotMb = Whole(raw, "max_snapshot_mb", "max_snapshot_mb", 50, 1, 10_000),
             Notify = Flag("notify", true),
             Keep = new Keep(

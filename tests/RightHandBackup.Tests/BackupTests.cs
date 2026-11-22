@@ -16,12 +16,15 @@ internal sealed class FakeTask : ITask
     {
         Schedule = schedule;
         Args = [.. args];
+        Description = schedule.Fingerprint is { } f ? ScheduleDrift.WithFingerprint("Backs up.", f) : "Backs up.";
         return exe + " " + string.Join(" ", args);
     }
 
+    public string? Description;
     public bool Disable() => true;
     public bool Stop() => true;
-    public IReadOnlyDictionary<string, string>? Status() => null;
+    public IReadOnlyDictionary<string, string>? Status() => Description is null ? null
+        : new Dictionary<string, string> { ["state"] = "Ready", ["description"] = Description };
 }
 
 public sealed class BackupTests : IDisposable
@@ -479,6 +482,51 @@ public sealed class BackupTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(120), task.Schedule!.Every);
         Assert.Null(task.Schedule.AfterUnlock);
         Assert.DoesNotContain("unlock", output);
+    }
+
+    // ---- [schedule] (0.3.0) ----
+
+    private string WithSchedule(string lines) => Settings() + "\n[schedule]\n" + lines;
+
+    [Fact]
+    public void Schedule_table_sets_the_task_and_no_table_keeps_the_defaults()
+    {
+        Assert.Equal(0, Run(WithSchedule("every_minutes = 60\nafter_unlock_minutes = 0\n"), "autostart", "on").Code);
+        Assert.Equal(TimeSpan.FromMinutes(60), task.Schedule!.Every);
+        Assert.Null(task.Schedule.AfterUnlock);
+        Assert.Equal("v1 job every=60 daily=- logon=yes unlock=0", task.Schedule.Fingerprint);
+
+        Assert.Equal(0, Run(Settings(), "autostart", "on").Code);
+        Assert.Equal(TimeSpan.FromMinutes(120), task.Schedule!.Every);
+        Assert.Equal(TimeSpan.FromMinutes(5), task.Schedule.AfterUnlock);
+    }
+
+    [Fact]
+    public void Old_keys_and_schedule_together_are_an_error()
+    {
+        var settings = Settings().Replace("max_snapshot_mb = 1", "max_snapshot_mb = 1\nevery_minutes = 120") + "\n[schedule]\nevery_minutes = 60\n";
+        var (code, _, err) = Run(settings, "autostart", "on");
+        Assert.Equal(2, code);
+        Assert.Contains("both at the top and in [schedule]", err);
+    }
+
+    [Fact]
+    public void Status_says_when_the_settings_changed_since_registration()
+    {
+        Run(WithSchedule("every_minutes = 120\n"), "autostart", "on");
+        Assert.DoesNotContain("settings changed", Run(WithSchedule("every_minutes = 120\n"), "autostart", "status").Out);
+        Assert.Contains("settings changed since this task was registered: run `right-hand-backup autostart on`",
+            Run(WithSchedule("every_minutes = 60\n"), "autostart", "status").Out);
+    }
+
+    [Fact]
+    public void A_run_outside_the_schedule_hours_takes_no_snapshot()
+    {
+        now = new DateTime(2026, 11, 19, 22, 0, 0);
+        var (code, output, _) = Run(WithSchedule("hours = \"08:00-18:00\"\n"), "run");
+        Assert.Equal(0, code);
+        Assert.Contains("Not running now", output);
+        Assert.False(Directory.Exists(Machine) && SnapshotNames().Length > 0);
     }
 
     // ---- OneDrive holding the destination (0.2.0) ----
